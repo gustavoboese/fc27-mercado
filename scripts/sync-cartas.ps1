@@ -40,7 +40,8 @@ foreach ($r in $Min..$Max) {
         clube         = $p.club.name
         liga          = $p.league.name
         nacao         = $p.nation.name
-        raridade      = $p.rarity.name
+        raridade      = $p.rarityName
+        qualidade     = $p.quality
         atualizado_em = $agora
       }
     }
