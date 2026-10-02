@@ -1,0 +1,23 @@
+name: sync-cartas
+on:
+  workflow_dispatch:
+    inputs:
+      rating_min:
+        description: "Rating minimo"
+        default: "85"
+      rating_max:
+        description: "Rating maximo"
+        default: "85"
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sincronizar cartas
+        shell: pwsh
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          RATING_MIN: ${{ inputs.rating_min }}
+          RATING_MAX: ${{ inputs.rating_max }}
+        run: ./scripts/sync-cartas.ps1 -Min $env:RATING_MIN -Max $env:RATING_MAX
