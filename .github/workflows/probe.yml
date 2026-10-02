@@ -1,0 +1,18 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Testar FUT Mind e FUT.GG a partir da nuvem
+        shell: pwsh
+        run: |
+          $ua = "Mozilla/5.0"
+          try {
+            $p = Invoke-RestMethod "https://futmind.com/api/beta/players/prices?resourceIds=237067,67345931" -UserAgent $ua
+            "FUT Mind OK: " + ($p | ConvertTo-Json -Compress)
+          } catch { "FUT Mind ERRO: " + $_.Exception.Message }
+          try {
+            $j = Invoke-RestMethod "https://www.fut.gg/api/fut/players/v2/27/?page=1&overall__gte=85&overall__lte=85" -UserAgent $ua -Headers @{ Accept = "application/json" }
+            "FUT.GG OK: cartas=$(@($j.data).Count) total=$($j.total)"
+          } catch { "FUT.GG ERRO: " + $_.Exception.Message }
