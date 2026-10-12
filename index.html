@@ -399,7 +399,8 @@ async function authToken() {
   }
 }
 async function authPedirCodigo(email) {
-  const r = await fetch(`${SUPA_URL}/auth/v1/otp`, {
+  const volta = location.origin + location.pathname;
+  const r = await fetch(`${SUPA_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(volta)}`, {
     method: "POST",
     headers: { apikey: SUPA_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ email, create_user: true, gotrue_meta_security: {} })
