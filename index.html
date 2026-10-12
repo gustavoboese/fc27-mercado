@@ -348,9 +348,121 @@ function idadeTexto(ts) {
 // Sincronização com a conta: quando a página corre publicada, o db guarda
 // o clube e os preços, e ficam acessíveis de qualquer dispositivo.
 let _dbP = null;
+// ---- Conta na nuvem (Supabase Auth + tabela estado, protegida por RLS) ----
+const AUTH_KEY = "sbc-supa-session";
+const NUVEM_SKIP = { mercado: 1, prices: 1 }; // o mercado vem da tabela publica, nao se guarda por utilizador
+function sessLer() {
+  try { return JSON.parse(localStorage.getItem(AUTH_KEY) || "null"); } catch (e) { return null; }
+}
+function sessGuardar(s) {
+  try { if (s) localStorage.setItem(AUTH_KEY, JSON.stringify(s)); else localStorage.removeItem(AUTH_KEY); } catch (e) {}
+}
+function sessDeTokens(at, rt, expIn) {
+  let uid = null, email = null;
+  try {
+    const p = JSON.parse(atob(at.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    uid = p.sub; email = p.email || null;
+  } catch (e) {}
+  return { at, rt, uid, email, exp: Date.now() + (Number(expIn) || 3600) * 1000 };
+}
+// Entrada pelo link do email: o Supabase volta aqui com os tokens no #hash.
+(function () {
+  try {
+    const h = location.hash || "";
+    if (h.indexOf("access_token=") >= 0) {
+      const q = new URLSearchParams(h.slice(1));
+      const at = q.get("access_token"), rt = q.get("refresh_token");
+      if (at && rt) {
+        sessGuardar(sessDeTokens(at, rt, q.get("expires_in")));
+        window.history.replaceState(null, "", location.pathname + location.search);
+      }
+    }
+  } catch (e) {}
+})();
+async function authToken() {
+  let s = sessLer();
+  if (!s) return null;
+  if (s.exp - Date.now() > 60000) return s;
+  try {
+    const r = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SUPA_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: s.rt })
+    });
+    if (!r.ok) { sessGuardar(null); return null; }
+    const j = await r.json();
+    s = sessDeTokens(j.access_token, j.refresh_token, j.expires_in);
+    sessGuardar(s);
+    return s;
+  } catch (e) {
+    return s.exp > Date.now() ? s : null;
+  }
+}
+async function authPedirCodigo(email) {
+  const r = await fetch(`${SUPA_URL}/auth/v1/otp`, {
+    method: "POST",
+    headers: { apikey: SUPA_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, create_user: true, gotrue_meta_security: {} })
+  });
+  if (!r.ok) {
+    let m = "";
+    try { const j = await r.json(); m = j.msg || j.error_description || j.message || ""; } catch (e) {}
+    throw new Error(m || `HTTP ${r.status}`);
+  }
+}
+async function authVerificar(email, token) {
+  const r = await fetch(`${SUPA_URL}/auth/v1/verify`, {
+    method: "POST",
+    headers: { apikey: SUPA_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "email", email, token })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error(j.msg || j.error_description || j.message || `HTTP ${r.status}`);
+  sessGuardar(sessDeTokens(j.access_token, j.refresh_token, j.expires_in));
+}
+function dbNuvem() {
+  return {
+    doc(path) {
+      const chave = String(path).replace(/^state\//, "");
+      return {
+        async get() {
+          if (NUVEM_SKIP[chave]) return { exists: false, data: () => null };
+          const s = await authToken();
+          if (!s) throw new Error("sem sessao");
+          const r = await fetch(`${SUPA_URL}/rest/v1/estado?chave=eq.${encodeURIComponent(chave)}&select=valor`, {
+            headers: { apikey: SUPA_KEY, Authorization: `Bearer ${s.at}` }
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const rows = await r.json();
+          return rows.length ? { exists: true, data: () => rows[0].valor } : { exists: false, data: () => null };
+        },
+        async set(body) {
+          if (NUVEM_SKIP[chave]) return;
+          const s = await authToken();
+          if (!s) throw new Error("sem sessao");
+          const r = await fetch(`${SUPA_URL}/rest/v1/estado?on_conflict=user_id,chave`, {
+            method: "POST",
+            headers: {
+              apikey: SUPA_KEY,
+              Authorization: `Bearer ${s.at}`,
+              "Content-Type": "application/json",
+              Prefer: "resolution=merge-duplicates,return=minimal"
+            },
+            body: JSON.stringify([{ user_id: s.uid, chave, valor: body, atualizado_em: new Date().toISOString() }])
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+        }
+      };
+    }
+  };
+}
 function getDb() {
   if (!_dbP) {
-    _dbP = typeof window !== "undefined" && window.claude && window.claude.use ? window.claude.use("db").catch(() => null) : Promise.resolve(null);
+    if (typeof window !== "undefined" && window.claude && window.claude.use) {
+      _dbP = window.claude.use("db").catch(() => null);
+    } else {
+      _dbP = authToken().then(s => (s ? dbNuvem() : null)).catch(() => null);
+    }
   }
   return _dbP;
 }
@@ -2007,6 +2119,23 @@ function SBCSolver() {
         return;
       }
       setSync("ligado");
+      if (!(window.claude && window.claude.use)) {
+        // Primeira vez com esta conta: se a nuvem ainda não tem algo e este browser tem, sobe-o.
+        const locais = [
+          ["state/club", { players, at: Date.now() }, players && players.length > 0],
+          ["state/cards", { cartas, at: Date.now() }, cartas && Object.keys(cartas).length > 0],
+          ["state/coins", { coins, at: Date.now() }, typeof coins === "number" && coins > 0],
+          ["state/bloqueadas", { keys: bloqueadas, at: Date.now() }, bloqueadas && bloqueadas.length > 0],
+          ["state/history", { amostras: historico }, historico && historico.length > 0]
+        ];
+        for (const [p, corpo, tem] of locais) {
+          if (!tem) continue;
+          try {
+            const snap = await db.doc(p).get();
+            if (snap && !snap.exists) await db.doc(p).set(corpo);
+          } catch (e) {}
+        }
+      }
       const c = await dbGet("state/club");
       if (vivo && c && Array.isArray(c.players) && c.players.length) {
         const mig = migrarPos(c.players);
@@ -2169,6 +2298,42 @@ function SBCSolver() {
       setExtMsg(e.message);
     }
     setExtBusy("");
+  };
+  const [aEmail, setAEmail] = useState("");
+  const [aCode, setACode] = useState("");
+  const [aStep, setAStep] = useState(0);
+  const [aMsg, setAMsg] = useState("");
+  const [aBusy, setABusy] = useState(false);
+  const sess = sessLer();
+  const pedirCodigo = async () => {
+    const em = aEmail.trim();
+    if (!em || em.indexOf("@") < 0) { setAMsg("Escreve o teu email."); return; }
+    setABusy(true);
+    setAMsg("");
+    try {
+      await authPedirCodigo(em);
+      setAStep(1);
+      setAMsg("Enviei um email. Clica no link que vem lá, ou escreve aqui o código.");
+    } catch (e) {
+      setAMsg("Não consegui enviar o email (" + e.message + ").");
+    }
+    setABusy(false);
+  };
+  const entrarCodigo = async () => {
+    setABusy(true);
+    setAMsg("");
+    try {
+      await authVerificar(aEmail.trim(), aCode.trim());
+      location.reload();
+      return;
+    } catch (e) {
+      setAMsg("Código inválido ou expirado (" + e.message + ").");
+    }
+    setABusy(false);
+  };
+  const sairConta = () => {
+    sessGuardar(null);
+    location.reload();
   };
   const [supaBusy, setSupaBusy] = useState(false);
   const [supaMsg, setSupaMsg] = useState("");
@@ -2555,7 +2720,38 @@ function SBCSolver() {
     className: "text-[#4fbf83] ml-2"
   }, "\xB7 sincronizado com a tua conta"), sync === "local" && /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] ml-2"
-  }, "\xB7 guardado s\xF3 neste browser")), /*#__PURE__*/React.createElement("div", {
+  }, "\xB7 guardado s\xF3 neste browser")), !(window.claude && window.claude.use) && React.createElement("div", {
+    className: "mt-3 text-xs text-[#8b98a5]"
+  }, sess ? React.createElement("span", null, "Conta: ", sess.email || "sessão iniciada", " \u00B7 ", React.createElement("button", {
+    onClick: sairConta,
+    className: "underline hover:text-[#dfe6ec]"
+  }, "sair")) : React.createElement("div", {
+    className: "rounded border border-[#26303b] bg-[#111820] p-3 flex flex-wrap items-center gap-2"
+  }, React.createElement("span", {
+    className: "text-[#dfe6ec]"
+  }, "Entrar para guardar o clube na nuvem:"), React.createElement("input", {
+    type: "email",
+    value: aEmail,
+    onChange: e => setAEmail(e.target.value),
+    placeholder: "o teu email",
+    className: "bg-[#0d1319] border border-[#26303b] rounded px-2 py-1 text-[#dfe6ec] w-52"
+  }), React.createElement("button", {
+    onClick: pedirCodigo,
+    disabled: aBusy,
+    className: "bg-[#5d8fc4] hover:bg-[#4d7cae] disabled:opacity-40 text-[#0b1015] font-medium px-3 py-1 rounded"
+  }, aStep ? "Reenviar" : "Enviar código"), aStep === 1 && React.createElement(React.Fragment, null, React.createElement("input", {
+    value: aCode,
+    onChange: e => setACode(e.target.value),
+    placeholder: "código",
+    inputMode: "numeric",
+    className: "bg-[#0d1319] border border-[#26303b] rounded px-2 py-1 text-[#dfe6ec] w-28"
+  }), React.createElement("button", {
+    onClick: entrarCodigo,
+    disabled: aBusy || !aCode.trim(),
+    className: "bg-[#2f9e6e] hover:bg-[#278a5f] disabled:opacity-40 text-[#0b1015] font-medium px-3 py-1 rounded"
+  }, "Entrar")), aMsg && React.createElement("span", {
+    className: "w-full text-[#d9a955]"
+  }, aMsg))), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-1 mt-6 mb-6 border-b border-[#1e2731]"
   }, [{
     id: "importar",
