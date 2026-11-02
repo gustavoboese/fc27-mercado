@@ -1654,6 +1654,17 @@ function planoVenda(players, usados, falta) {
     maxPossivel: plano.soma + totalOnze
   };
 }
+// Identidade do jogador para a regra "sem repetidos": o nome sem acentos nem o
+// sufixo "(comprar)". Assim a carta do clube e a do mercado (ou duas versões do
+// mesmo jogador) contam como o mesmo, como faz a EA.
+function idDe(p) {
+  if (!p) return "";
+  if (p._id) return p._id;
+  const nome = String(p.name || "").replace(/\s*\(comprar\)\s*$/i, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+  const id = nome && nome !== "sem nome" ? "n:" + nome : "k:" + (p.ident || p.key);
+  try { Object.defineProperty(p, "_id", { value: id, enumerable: false }); } catch (e) {}
+  return id;
+}
 function costOf(p) {
   return cashOf(p) + burnOf(p);
 }
@@ -1683,7 +1694,7 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
   const vistos = new Set();
   let repetidos = 0;
   selection.forEach(p => {
-    const id = p.ident || p.name;
+    const id = idDe(p);
     if (vistos.has(id)) repetidos++;else vistos.add(id);
   });
   const cash = selection.reduce((s, p) => s + cashOf(p), 0);
@@ -1759,7 +1770,15 @@ function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form
   };
   if (pool.length < livres) return null;
   const byCost = [...pool].sort((a, b) => costOf(a) - costOf(b) || a.rating - b.rating);
-  let best = byCost.slice(0, livres);
+  const semRep = [],
+    vistosIni = new Set();
+  for (const p of byCost) {
+    if (semRep.length >= livres) break;
+    if (vistosIni.has(idDe(p))) continue;
+    vistosIni.add(idDe(p));
+    semRep.push(p);
+  }
+  let best = semRep.length === livres ? semRep : byCost.slice(0, livres);
   let bestEval = aval(best);
   const voltas = minChem > 0 ? 5 : 14;
   const passos = minChem > 0 ? 500 : 900;
@@ -1769,7 +1788,7 @@ function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form
     for (let it = 0; it < passos; it++) {
       const idx = Math.floor(Math.random() * livres);
       const swapIn = pool[Math.floor(Math.random() * pool.length)];
-      if (cand.some(p => p.key === swapIn.key)) continue;
+      if (cand.some((p, i) => p.key === swapIn.key || i !== idx && idDe(p) === idDe(swapIn))) continue;
       const trial = [...cand];
       trial[idx] = swapIn;
       const trialEval = aval(trial);
@@ -1811,8 +1830,9 @@ function refinar(cand, ev, pool, aval) {
       }
       let melhorT = null,
         melhorE = ev;
+      const outrosIds = new Set(cand.filter((_, i) => i !== idx).map(idDe));
       for (const c of pool) {
-        if (naSel.has(c.key)) continue;
+        if (naSel.has(c.key) || outrosIds.has(idDe(c))) continue;
         if (slot && !podeJogar(c, slot)) continue;
         const t = cand.slice();
         t[idx] = c;
@@ -2093,6 +2113,11 @@ function SBCSolver() {
       locked
     };
   }, [players, bloqueadas]);
+  // Se a formação escrita tem menos posições do que o plantel (SBC com posições
+  // trancadas, sem liga nem nada), o plantel fica só com essas posições.
+  const formLida = lerFormacao(formTexto);
+  const formLimita = formacao === "custom" && formLida.maus.length === 0 && formLida.slots.length > 0 && formLida.slots.length < size;
+  const sizeEf = formLimita ? formLida.slots.length : size;
   const run = () => {
     setBusy(true);
     setResult(null);
@@ -2100,6 +2125,7 @@ function SBCSolver() {
     setConfirmarFeito(false);
     setTimeout(() => {
       const form = formacao === "custom" ? lerFormacao(formTexto).slots : formacao;
+      const size = sizeEf;
       const r = solve(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form, ligacoes);
       // Sem requisito de química o solver não arruma o onze; arruma-se só para mostrar.
       const formOk = Array.isArray(form) ? form.length >= size : !!FORMACOES[form];
@@ -3443,7 +3469,7 @@ function SBCSolver() {
     className: "text-sm text-[#dfe6ec]"
   }, "Posi\xE7\xF5es bloqueadas pela SBC", ligacoes.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] text-xs ml-2"
-  }, ligacoes.length, " \u2014 o solver escolhe", " ", Math.max(0, size - ligacoes.length), " jogadores")), /*#__PURE__*/React.createElement("p", {
+  }, ligacoes.length, " \u2014 o solver escolhe", " ", Math.max(0, sizeEf - ligacoes.length), " jogadores")), /*#__PURE__*/React.createElement("p", {
     className: "text-[#6b7885] text-xs mt-1"
   }, "Lugares que n\xE3o podes preencher, mas que d\xE3o liga\xE7\xF5es de qu\xEDmica pelo clube, liga e nacionalidade. N\xE3o t\xEAm OVR e n\xE3o contam para a m\xE9dia nem para os requisitos."), ligacoes.length > 0 && /*#__PURE__*/React.createElement("ul", {
     className: "mt-3 space-y-1"
@@ -3546,14 +3572,14 @@ function SBCSolver() {
     value: f
   }, f)), /*#__PURE__*/React.createElement("option", {
     value: "auto"
-  }, "testar todas")))), minChem > 0 && formacao === "custom" && (() => {
+  }, "testar todas")))), formacao === "custom" && (() => {
     const {
       slots,
       maus
     } = lerFormacao(formTexto);
     return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
       className: "text-sm text-[#8b98a5] block mb-1"
-    }, "Posi\xE7\xF5es do campo, na ordem que quiseres"), /*#__PURE__*/React.createElement("input", {
+    }, "Posi\xE7\xF5es do campo (s\xF3 as que a SBC deixa preencher \u2014 sem as trancadas)"), /*#__PURE__*/React.createElement("input", {
       value: formTexto,
       onChange: e => setFormTexto(e.target.value),
       className: `${input} w-full max-w-2xl`
@@ -3561,12 +3587,16 @@ function SBCSolver() {
       className: "text-[#6b7885] text-xs mt-1"
     }, "Copia as etiquetas do ecr\xE3 da SBC, tal como aparecem."), maus.length > 0 && /*#__PURE__*/React.createElement("p", {
       className: "text-[#d9836f] text-sm mt-1"
-    }, "N\xE3o reconhe\xE7o: ", maus.join(", ")), !maus.length && slots.length !== size && /*#__PURE__*/React.createElement("p", {
+    }, "N\xE3o reconhe\xE7o: ", maus.join(", ")), !maus.length && slots.length < size && /*#__PURE__*/React.createElement("p", {
+      className: "text-[#4fbf83] text-sm mt-1"
+    }, slots.join(" · "), " \u2014 o solver monta s\xF3 ", slots.length, " jogadores (as outras ", size - slots.length, " ficam vazias)."), !maus.length && slots.length > size && /*#__PURE__*/React.createElement("p", {
       className: "text-[#d9a955] text-sm mt-1"
     }, "Escreveste ", slots.length, " posi\xE7\xF5es mas o plantel \xE9 de", " ", size, "."), !maus.length && slots.length === size && /*#__PURE__*/React.createElement("p", {
       className: "text-[#4fbf83] text-sm mt-1"
     }, slots.join(" · ")));
-  })(), minChem > 0 && size !== 11 && /*#__PURE__*/React.createElement("p", {
+  })(), formLimita && /*#__PURE__*/React.createElement("p", {
+    className: "text-[#d9a955] text-sm"
+  }, "Aten\xE7\xE3o: a forma\xE7\xE3o escrita s\xF3 tem ", sizeEf, " posi\xE7\xF5es, por isso o plantel fica com ", sizeEf, ". Numa SBC normal volta a p\xF4r as 11."), minChem > 0 && size !== 11 && !formLimita && /*#__PURE__*/React.createElement("p", {
     className: "text-[#d9a955] text-sm"
   }, "A qu\xEDmica s\xF3 existe com 11 jogadores. Com ", size, " n\xE3o faz sentido."), /*#__PURE__*/React.createElement("label", {
     className: "flex items-center gap-2 text-sm text-[#dfe6ec]"
@@ -3641,10 +3671,10 @@ function SBCSolver() {
     className: "text-[#8b98a5] hover:text-[#e0665c] text-xs"
   }, "remover"))))), (() => {
     const cover = reqs.reduce((m, r) => Math.max(m, Number(r.min) || 0), 0);
-    if (!reqs.length || cover >= size || minAvg > 0 || maxAvg > 0) return null;
+    if (!reqs.length || cover >= sizeEf || minAvg > 0 || maxAvg > 0) return null;
     return /*#__PURE__*/React.createElement("p", {
       className: "text-[#d9a955] text-sm"
-    }, "Os requisitos s\xF3 constrangem ", cover, " das ", size, " cartas \u2014 as restantes ", size - cover, " entram sem regra nenhuma. Confirma o tamanho do plantel.");
+    }, "Os requisitos s\xF3 constrangem ", cover, " das ", sizeEf, " cartas \u2014 as restantes ", sizeEf - cover, " entram sem regra nenhuma. Confirma o tamanho do plantel.");
   })(), !reqs.length && !minChem && !minAvg && !maxAvg && /*#__PURE__*/React.createElement("p", {
     className: "text-[#d9a955] text-sm"
   }, "N\xE3o h\xE1 nenhum requisito carregado \u2014 escolhe o desafio na lista antes de resolver, sen\xE3o qualquer onze serve."), doneMsg && /*#__PURE__*/React.createElement("div", {
@@ -3655,7 +3685,7 @@ function SBCSolver() {
     className: "flex items-center gap-3"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: run,
-    disabled: pool.length < size || busy,
+    disabled: pool.length < sizeEf || busy,
     className: "bg-[#c9a227] hover:bg-[#b58f1f] disabled:opacity-40 text-[#1a1506] text-sm font-semibold px-5 py-2 rounded"
   }, busy ? "A resolver…" : "Resolver SBC"), /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] text-xs"
