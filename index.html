@@ -2371,6 +2371,17 @@ function SBCSolver() {
   });
   const [result, setResult] = useState(null);
   const [falha, setFalha] = useState(null);
+  // Cartas do mercado que o utilizador não conseguiu comprar (têm preço mas não há
+  // à venda). Ficam de fora durante 24h; depois voltam a ser candidatas.
+  const [semMercado, setSemMercado] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem("sbc-solver-sem-mercado") || "[]") || [];
+      return v.filter(x => x && x.k && Date.now() - x.at < 24 * 3600 * 1000);
+    } catch (e) {
+      return [];
+    }
+  });
+  const refazRef = React.useRef(false);
   const [busy, setBusy] = useState(false);
   const [sbcRaw, setSbcRaw] = useState("");
   const [sbcList, setSbcList] = useState([]);
@@ -2440,9 +2451,25 @@ function SBCSolver() {
     const bloq = new Set(bloqueadas);
     const mine = players.filter(p => !p.loan && !bloq.has(String(p.key)) && !(protectSquad && p.inActiveSquad));
     if (!useMarket) return mine;
-    const doMercado = Object.keys(mercado).length ? cartasMercado(mercado) : marketCards(prices, Math.max(11, size), pricesPos);
+    const fora = new Set(semMercado.map(x => x.k));
+    const doMercado = (Object.keys(mercado).length ? cartasMercado(mercado) : marketCards(prices, Math.max(11, size), pricesPos)).filter(c => !fora.has(c.key));
     return [...mine, ...doMercado];
-  }, [players, protectSquad, prices, pricesPos, mercado, useMarket, size, bloqueadas]);
+  }, [players, protectSquad, prices, pricesPos, mercado, useMarket, size, bloqueadas, semMercado]);
+  const guardarSemMercado = lista => {
+    setSemMercado(lista);
+    try {
+      localStorage.setItem("sbc-solver-sem-mercado", JSON.stringify(lista));
+    } catch (e) {}
+  };
+  // "Não consigo comprar esta": tira a carta do mercado e recalcula já a solução.
+  const marcarSemMercado = c => {
+    refazRef.current = true;
+    guardarSemMercado([...semMercado.filter(x => x.k !== c.key), {
+      k: c.key,
+      n: String(c.name).replace(/\s*\(comprar\)\s*$/i, ""),
+      at: Date.now()
+    }]);
+  };
   const stats = useMemo(() => {
     const untradeable = players.filter(p => p.untradeable).length;
     const value = players.filter(p => !p.untradeable).reduce((s, p) => s + (p.price || 0), 0);
@@ -2513,6 +2540,12 @@ function SBCSolver() {
       setBusy(false);
     }, 20);
   };
+  useEffect(() => {
+    if (refazRef.current) {
+      refazRef.current = false;
+      run();
+    }
+  }, [pool]);
   useEffect(() => {
     let vivo = true;
     (async () => {
@@ -4067,7 +4100,11 @@ function SBCSolver() {
     className: "bg-[#c9a227] hover:bg-[#b58f1f] disabled:opacity-40 text-[#1a1506] text-sm font-semibold px-5 py-2 rounded"
   }, busy ? "A resolver…" : "Resolver SBC"), /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] text-xs"
-  }, pool.length, " cartas dispon\xEDveis", protectSquad && players.length > pool.length ? ` (${players.length - pool.length} protegidas no onze)` : "")), falha && !busy && /*#__PURE__*/React.createElement("div", {
+  }, pool.length, " cartas dispon\xEDveis", protectSquad && players.length > pool.length ? ` (${players.length - pool.length} protegidas no onze)` : ""), semMercado.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => guardarSemMercado([]),
+    title: semMercado.map(x => x.n).join(", "),
+    className: "text-xs text-[#d9a955] hover:text-[#f4faf7] underline"
+  }, semMercado.length, " sem mercado \u2014 repor")), falha && !busy && /*#__PURE__*/React.createElement("div", {
     className: "rounded border border-[#5a2f2a] bg-[#1d1210] p-4 space-y-3"
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-[#e0736b] text-sm font-semibold"
@@ -4192,7 +4229,11 @@ function SBCSolver() {
     className: "text-[#d9a955]"
   }, "Carta em falta \u2014 ", descreverFantasma(p)) : p.name, p.market && !p.fantasma && /*#__PURE__*/React.createElement("span", {
     className: "ml-2 text-[10px] text-[#d9a955]"
-  }, "comprar")), /*#__PURE__*/React.createElement("td", {
+  }, "comprar"), p.market && !p.fantasma && /*#__PURE__*/React.createElement("button", {
+    onClick: () => marcarSemMercado(p),
+    title: "Tem pre\u00e7o mas n\u00e3o h\u00e1 \u00e0 venda: tiro-a do mercado e procuro outra",
+    className: "ml-2 text-[10px] text-[#e0736b] hover:text-[#f4faf7] border border-[#5a2f2a] rounded px-1.5 py-0.5"
+  }, "n\u00e3o consigo comprar")), /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2 tabular-nums"
   }, p.rating), /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2"
