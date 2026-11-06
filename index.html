@@ -1357,6 +1357,15 @@ function parseClubJson(raw) {
 }
 
 // Moedas que saem mesmo da carteira: só cartas do mercado que terias de comprar.
+// Cartas tuas que não são Common/Rare "normais" (Team of the Week, Heróis, Ícones,
+// Team of the Season…). Valem muito mais do que o OVR sugere: por defeito ficam
+// de fora das soluções.
+function ehEspecial(p) {
+  if (!p || p.market || p.owned === false) return false;
+  const r = String(p.rarity == null ? "" : p.rarity).trim();
+  if (!r || r === "?") return false;
+  return !/^(common|rare)( (bronze|silver|gold))?$/i.test(r);
+}
 function cashOf(p) {
   if (p.fantasma) return 0;
   return p.owned === false ? Number(p.price) || 0 : 0;
@@ -1769,6 +1778,10 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
   const unknown = selection.filter(p => !p.untradeable && p.price == null).length * 20;
   // Carta em falta (que não existe no clube nem no mercado): só entra se não
   // houver outra maneira, e quanto menos e mais baixas, melhor.
+  // Carta especial tua: queimá-la custa sempre o valor todo (o peso "nada" não vale
+  // aqui), e sem preço conhecido assume-se que vale muito.
+  const burnEsp = selection.reduce((t, p) => t + (ehEspecial(p) ? burnOf(p) : 0), 0);
+  const espSemPreco = selection.filter(p => ehEspecial(p) && !p.untradeable && !(Number(p.price) > 0)).length * 5000;
   const fantasmas = selection.filter(p => p.fantasma);
   const fantCusto = fantasmas.reduce((t, p) => t + 100000 + p.rating, 0);
   return {
@@ -1784,7 +1797,7 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
     chemGap,
     cash,
     burn,
-    objective: cash + burn * w + penalty + burnTie + unknown + fantCusto
+    objective: cash + burn * w + burnEsp * (1 - w) + espSemPreco + penalty + burnTie + unknown + fantCusto
   };
 }
 function shuffle(a) {
@@ -2173,6 +2186,8 @@ function diagnosticarFalha(pool, r, extra) {
       motivos.push(`${reqLabel(rs)} — só há ${disp} carta(s) assim disponíveis`);
       const prot = (ex.protegidas || []).filter(p => countMatching([p], rs) > 0).length;
       if (prot > 0) dicas.push(`Tens ${prot} carta(s) assim no teu onze activo — desmarca "Não tocar nas cartas do onze activo" para as poder usar.`);
+      const esp = (ex.especiais || []).filter(p => countMatching([p], rs) > 0).length;
+      if (esp > 0) dicas.push(`Tens ${esp} carta(s) especiais assim (TOTW, Heróis…) que deixei de fora — marca "Usar as minhas cartas especiais" se quiseres arriscá-las.`);
       const indis = (ex.indisponiveis || []).filter(p => countMatching([p], rs) > 0).length;
       if (indis > 0) dicas.push(`${indis} carta(s) assim estão como empréstimo ou bloqueadas, por isso ficam de fora.`);
       if (ex.temMercado && !ex.usaMercado) dicas.push('Está desligado "Deixar comprar do mercado" — ligá-lo pode dar-te cartas que faltam.');
@@ -2371,6 +2386,7 @@ function SBCSolver() {
   });
   const [result, setResult] = useState(null);
   const [falha, setFalha] = useState(null);
+  const [usarEspeciais, setUsarEspeciais] = useState(false);
   // Cartas do mercado que o utilizador não conseguiu comprar (têm preço mas não há
   // à venda). Ficam de fora durante 24h; depois voltam a ser candidatas.
   const [semMercado, setSemMercado] = useState(() => {
@@ -2449,12 +2465,17 @@ function SBCSolver() {
   };
   const pool = useMemo(() => {
     const bloq = new Set(bloqueadas);
-    const mine = players.filter(p => !p.loan && !bloq.has(String(p.key)) && !(protectSquad && p.inActiveSquad));
+    // Raridades que a própria SBC pede ficam sempre disponíveis.
+    const raridadesPedidas = new Set();
+    (reqs || []).forEach(r => {
+      if (r.field === "rarity") String(r.value).toLowerCase().split("|").forEach(x => raridadesPedidas.add(x.trim()));
+    });
+    const mine = players.filter(p => !p.loan && !bloq.has(String(p.key)) && !(protectSquad && p.inActiveSquad) && (usarEspeciais || !ehEspecial(p) || raridadesPedidas.has(String(p.rarity).toLowerCase())));
     if (!useMarket) return mine;
     const fora = new Set(semMercado.map(x => x.k));
     const doMercado = (Object.keys(mercado).length ? cartasMercado(mercado) : marketCards(prices, Math.max(11, size), pricesPos)).filter(c => !fora.has(c.key));
     return [...mine, ...doMercado];
-  }, [players, protectSquad, prices, pricesPos, mercado, useMarket, size, bloqueadas, semMercado]);
+  }, [players, protectSquad, prices, pricesPos, mercado, useMarket, size, bloqueadas, semMercado, usarEspeciais, reqs]);
   const guardarSemMercado = lista => {
     setSemMercado(lista);
     try {
@@ -2530,7 +2551,8 @@ function SBCSolver() {
           temMercado: todos.length > 0,
           usaMercado: useMarket,
           protegidas: protectSquad ? players.filter(p => !p.loan && !bloq.has(String(p.key)) && p.inActiveSquad) : [],
-          indisponiveis: players.filter(p => p.loan || bloq.has(String(p.key)))
+          indisponiveis: players.filter(p => p.loan || bloq.has(String(p.key))),
+          especiais: usarEspeciais ? [] : players.filter(p => !p.loan && !bloq.has(String(p.key)) && ehEspecial(p))
         }));
         setResult(null);
       } else {
@@ -4016,6 +4038,14 @@ function SBCSolver() {
     checked: protectSquad,
     onChange: e => setProtectSquad(e.target.checked)
   }), "N\xE3o tocar nas cartas do onze activo"), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-sm text-[#dfe6ec]"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: usarEspeciais,
+    onChange: e => setUsarEspeciais(e.target.checked)
+  }), "Usar as minhas cartas especiais (TOTW, Her\xF3is, \xCDcones\u2026)", !usarEspeciais && players.filter(ehEspecial).length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "text-[#6b7885] text-xs"
+  }, players.filter(ehEspecial).length, " de fora")), /*#__PURE__*/React.createElement("label", {
     className: "text-sm text-[#8b98a5] block"
   }, "Moedas que tens", /*#__PURE__*/React.createElement("input", {
     type: "number",
