@@ -630,6 +630,25 @@ async function lerMercadoSupabase() {
   if (!n) throw new Error("A tabela veio vazia.");
   return { mercado, at: maxAt, n };
 }
+// Pesquisa uma carta pelo nome (e/ou OVR) na tabela `cartas` do Supabase.
+async function pesquisarCartas(texto) {
+  const toks = String(texto || "").trim().split(/\s+/).filter(Boolean);
+  if (!toks.length) return [];
+  const q = [];
+  toks.forEach(t => {
+    if (/^\d{2}$/.test(t)) q.push(`overall=eq.${t}`);else {
+      // vogais acentuadas/ç/ñ viram "_" para apanhar variações (Vinícius = Vinicius)
+      const lim = t.replace(/[^A-Za-z0-9 ]/g, "_").replace(/[%*,()]/g, "");
+      if (lim) q.push(`nome=ilike.*${encodeURIComponent(lim)}*`);
+    }
+  });
+  if (!q.length) return [];
+  const url = `${SUPA_URL}/rest/v1/cartas?select=ea_id,nome,overall,posicao,posicoes_alt,clube,liga,nacao,raridade&${q.join("&")}&order=overall.desc&limit=15`;
+  const r = await fetch(url, { headers: { apikey: SUPA_KEY } });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const rows = await r.json();
+  return Array.isArray(rows) ? rows : [];
+}
 const CSTORE = "sbc-solver-cards";
 const MAX_CARTAS = 600;
 const MAX_PONTOS = 40;
@@ -2444,8 +2463,56 @@ function SBCSolver() {
     club: "",
     rarity: "Rare",
     untradeable: true,
-    price: ""
+    price: "",
+    altPositions: [],
+    eaId: null
   });
+  const [busca, setBusca] = useState("");
+  const [achadas, setAchadas] = useState(null);
+  const [buscaErro, setBuscaErro] = useState("");
+  React.useEffect(() => {
+    const t = busca.trim();
+    if (t.length < 2) {
+      setAchadas(null);
+      setBuscaErro("");
+      return;
+    }
+    let vivo = true;
+    const h = setTimeout(() => {
+      pesquisarCartas(t).then(rs => {
+        if (vivo) {
+          setAchadas(rs);
+          setBuscaErro("");
+        }
+      }).catch(() => {
+        if (vivo) {
+          setAchadas(null);
+          setBuscaErro("Não consegui pesquisar agora. Preenche à mão.");
+        }
+      });
+    }, 300);
+    return () => {
+      vivo = false;
+      clearTimeout(h);
+    };
+  }, [busca]);
+  const escolherCarta = c => {
+    const pi = Object.keys(POS).find(k => POS[k] === c.posicao);
+    setMan(m => ({
+      ...m,
+      name: c.nome || "",
+      rating: String(c.overall || ""),
+      position: pi != null ? Number(pi) : m.position,
+      nation: c.nacao || "",
+      league: c.liga || "",
+      club: c.clube || "",
+      rarity: c.raridade || "Rare",
+      altPositions: c.posicoes_alt || [],
+      eaId: c.ea_id
+    }));
+    setBusca("");
+    setAchadas(null);
+  };
   const doImport = () => {
     const {
       players: parsed,
@@ -3104,7 +3171,8 @@ function SBCSolver() {
       name: man.name.trim() || `Carta ${rating}`,
       rating,
       position: POS[man.position] ?? "?",
-      altPositions: [],
+      altPositions: man.altPositions || [],
+      eaId: man.eaId || undefined,
       nation: man.nation.trim() || "?",
       league: man.league.trim() || "?",
       club: man.club.trim() || "?",
@@ -3126,7 +3194,9 @@ function SBCSolver() {
       ...m,
       name: "",
       rating: "",
-      price: ""
+      price: "",
+      altPositions: [],
+      eaId: null
     }));
   };
   const markDone = () => {
@@ -3308,6 +3378,27 @@ function SBCSolver() {
   }, "Para cartas acabadas de sair de packs, enquanto o FUT.GG n\xE3o sincroniza. Desaparecem na pr\xF3xima importa\xE7\xE3o."), showManual && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 space-y-3"
   }, /*#__PURE__*/React.createElement("div", {
+    className: "relative"
+  }, /*#__PURE__*/React.createElement("input", {
+    placeholder: "Pesquisar carta (ex: vini 91, mbappe, cafu icon)\u2026",
+    value: busca,
+    onChange: e => setBusca(e.target.value),
+    className: `${input} w-full`
+  }), buscaErro && /*#__PURE__*/React.createElement("p", {
+    className: "text-[#e0a23a] text-xs mt-1"
+  }, buscaErro), achadas && /*#__PURE__*/React.createElement("div", {
+    className: "absolute z-20 left-0 right-0 mt-1 max-h-72 overflow-auto rounded border border-[#26303b] bg-[#0d131a] shadow-lg"
+  }, achadas.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    className: "px-3 py-2 text-xs text-[#6b7885]"
+  }, "Nada encontrado. Preenche \xE0 m\xE3o.") : achadas.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.ea_id,
+    onClick: () => escolherCarta(c),
+    className: "block w-full text-left px-3 py-1.5 text-sm text-[#dfe6ec] hover:bg-[#1a2430] border-b border-[#1a2430] last:border-0"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-[#c9a227] font-medium mr-2"
+  }, c.overall), c.nome, /*#__PURE__*/React.createElement("span", {
+    className: "text-[#6b7885] text-xs ml-2"
+  }, [c.posicao, c.raridade, c.clube].filter(Boolean).join(" \xB7 ")))))), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-2 sm:grid-cols-4 gap-2"
   }, /*#__PURE__*/React.createElement("input", {
     placeholder: "Nome (opcional)",
