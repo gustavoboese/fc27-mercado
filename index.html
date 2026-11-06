@@ -528,29 +528,86 @@ function cartasMercado(mercado) {
       });
     });
   });
+  return podarMercado(out);
+}
+// Com Bronze e Prata o mercado passa de milhares para dezenas de milhares de
+// cartas. Cartas com exactamente os mesmos atributos (OVR, posições, clube, liga,
+// nação, raridade) servem para o mesmo, por isso só interessam as mais baratas.
+function podarMercado(cartas) {
+  const grupos = new Map();
+  cartas.forEach(c => {
+    const k = [c.rating, c.position, (c.altPositions || []).slice().sort().join(","), c.club, c.league, c.nation, c.rarity].join("|");
+    let g = grupos.get(k);
+    if (!g) {
+      g = [];
+      grupos.set(k, g);
+    }
+    g.push(c);
+  });
+  const out = [];
+  grupos.forEach(g => {
+    g.sort((a, b) => a.price - b.price);
+    for (let i = 0; i < Math.min(3, g.length); i++) out.push(g[i]);
+  });
   return out;
 }
 // ---- Mercado online (Supabase, preenchido todos os dias pelo fc27-mercado) ----
 const SUPA_URL = "https://lbxelhaccyybauhsazch.supabase.co";
 const SUPA_KEY = "sb_publishable_-zvChUp_r_zQpTqvg-UJUA_cpE8MPDK"; // chave pública, só leitura
 const SUPA_STATE = { ok: false };
-async function supaTabela(tabela, colunas) {
-  const out = [];
-  for (let off = 0; off < 20000; off += 1000) {
-    const url = `${SUPA_URL}/rest/v1/${tabela}?select=${colunas}&order=ea_id.asc&limit=1000&offset=${off}`;
-    const r = await fetch(url, { headers: { apikey: SUPA_KEY } });
+async function supaTabela(tabela, colunas, filtro) {
+  const base = `${SUPA_URL}/rest/v1/${tabela}?select=${colunas}${filtro ? "&" + filtro : ""}&order=ea_id.asc&limit=1000`;
+  const pag = async off => {
+    const url = `${base}&offset=${off}`;
+    let r;
+    try {
+      r = await fetch(url, {
+        headers: {
+          apikey: SUPA_KEY,
+          Prefer: "count=exact"
+        }
+      });
+    } catch (e) {
+      // Se o browser barrar o cabeçalho Prefer, repete sem ele (vai mais devagar).
+      r = await fetch(url, {
+        headers: {
+          apikey: SUPA_KEY
+        }
+      });
+    }
     if (!r.ok) throw new Error(`${tabela}: HTTP ${r.status}`);
     const rows = await r.json();
     if (!Array.isArray(rows)) throw new Error(`${tabela}: resposta inesperada`);
-    out.push(...rows);
-    if (rows.length < 1000) break;
+    const m = /\/(\d+)$/.exec(r.headers.get("content-range") || "");
+    return {
+      rows,
+      total: m ? Number(m[1]) : null
+    };
+  };
+  const primeira = await pag(0);
+  const out = [...primeira.rows];
+  if (primeira.rows.length < 1000) return out;
+  if (primeira.total != null) {
+    // Sabemos quantas páginas há: vão-se buscando 6 de cada vez.
+    const offs = [];
+    for (let o = 1000; o < primeira.total; o += 1000) offs.push(o);
+    for (let i = 0; i < offs.length; i += 6) {
+      const lote = await Promise.all(offs.slice(i, i + 6).map(pag));
+      lote.forEach(x => out.push(...x.rows));
+    }
+    return out;
+  }
+  for (let off = 1000; off < 200000; off += 1000) {
+    const x = await pag(off);
+    out.push(...x.rows);
+    if (x.rows.length < 1000) break;
   }
   return out;
 }
 async function lerMercadoSupabase() {
   const [cartas, precos] = await Promise.all([
     supaTabela("cartas", "ea_id,nome,overall,posicao,posicoes_alt,clube,liga,nacao,raridade"),
-    supaTabela("precos", "ea_id,preco_consola,atualizado_em")
+    supaTabela("precos", "ea_id,preco_consola,atualizado_em", "preco_consola=gt.0")
   ]);
   const preco = new Map();
   precos.forEach(p => preco.set(p.ea_id, p));
@@ -1301,6 +1358,7 @@ function parseClubJson(raw) {
 
 // Moedas que saem mesmo da carteira: só cartas do mercado que terias de comprar.
 function cashOf(p) {
+  if (p.fantasma) return 0;
   return p.owned === false ? Number(p.price) || 0 : 0;
 }
 
@@ -1404,7 +1462,7 @@ function lerFormacao(texto) {
   };
 }
 function podeJogar(p, slot) {
-  return p.position === slot || (p.altPositions || []).indexOf(slot) >= 0;
+  return p.position === "*" || p.position === slot || (p.altPositions || []).indexOf(slot) >= 0;
 }
 
 // Emparelhamento máximo jogadores↔posições (Kuhn). Maximiza quantos ficam
@@ -1475,10 +1533,11 @@ function calcularQuimica(sel, formacao, ligacoes) {
   const cC = {},
     cN = {},
     cL = {};
+  // Atributo desconhecido ("?") não liga a ninguém.
   elig.forEach(a => {
-    cC[a.player.club] = (cC[a.player.club] || 0) + 1;
-    cN[a.player.nation] = (cN[a.player.nation] || 0) + 1;
-    cL[a.player.league] = (cL[a.player.league] || 0) + 1;
+    if (a.player.club && a.player.club !== "?") cC[a.player.club] = (cC[a.player.club] || 0) + 1;
+    if (a.player.nation && a.player.nation !== "?") cN[a.player.nation] = (cN[a.player.nation] || 0) + 1;
+    if (a.player.league && a.player.league !== "?") cL[a.player.league] = (cL[a.player.league] || 0) + 1;
   });
   // Os lugares bloqueados contam para os limiares dos outros, mas não pontuam.
   presas.forEach(lg => {
@@ -1492,7 +1551,7 @@ function calcularQuimica(sel, formacao, ligacoes) {
       a.chem = 0;
       return;
     }
-    const pts = pontosClube(cC[a.player.club] || 0) + pontosNacao(cN[a.player.nation] || 0) + pontosLiga(cL[a.player.league] || 0);
+    const pts = (a.player.club !== "?" ? pontosClube(cC[a.player.club] || 0) : 0) + (a.player.nation !== "?" ? pontosNacao(cN[a.player.nation] || 0) : 0) + (a.player.league !== "?" ? pontosLiga(cL[a.player.league] || 0) : 0);
     a.chem = Math.min(3, pts);
     total += a.chem;
   });
@@ -1666,7 +1725,7 @@ function idDe(p) {
   return id;
 }
 function costOf(p) {
-  return cashOf(p) + burnOf(p);
+  return cashOf(p) + burnOf(p) + (p.fantasma ? 100000 + p.rating : 0);
 }
 function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao, ligacoes) {
   const w = burnWeight == null ? 1 : burnWeight;
@@ -1708,7 +1767,12 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
 
   // Carta vendável sem preço conhecido não deve passar por grátis.
   const unknown = selection.filter(p => !p.untradeable && p.price == null).length * 20;
+  // Carta em falta (que não existe no clube nem no mercado): só entra se não
+  // houver outra maneira, e quanto menos e mais baixas, melhor.
+  const fantasmas = selection.filter(p => p.fantasma);
+  const fantCusto = fantasmas.reduce((t, p) => t + 100000 + p.rating, 0);
   return {
+    fantasmas: fantasmas.length,
     cost,
     avg,
     reqStatus,
@@ -1720,7 +1784,7 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
     chemGap,
     cash,
     burn,
-    objective: cash + burn * w + penalty + burnTie + unknown
+    objective: cash + burn * w + penalty + burnTie + unknown + fantCusto
   };
 }
 function shuffle(a) {
@@ -1731,13 +1795,13 @@ function shuffle(a) {
   }
   return x;
 }
-function solve(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, ligacoes) {
+function solve(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, ligacoes, opts) {
   if (pool.length < Math.max(0, size - (ligacoes || []).length)) return null;
 
   // Primeiro tenta só com o que já tens. Só se não der é que abre ao mercado.
   const meus = pool.filter(p => !p.market);
   const temMercado = meus.length !== pool.length;
-  if (temMercado && meus.length >= Math.max(0, size - (ligacoes || []).length)) {
+  if (!(opts && opts.pularMeus) && temMercado && meus.length >= Math.max(0, size - (ligacoes || []).length)) {
     const semComprar = solve(meus, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, ligacoes);
     if (semComprar && semComprar.evaluation.ok) {
       semComprar.semCompras = true;
@@ -1748,17 +1812,70 @@ function solve(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, 
   // "auto": corre uma vez por formação e fica com a melhor.
   if (minChem > 0 && formacao === "auto" && !Array.isArray(formacao)) {
     let melhor = null;
-    Object.keys(FORMACOES).forEach(f => {
-      const r = resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, f, ligacoes);
-      if (!r) return;
-      r.formacao = f;
-      if (!melhor || r.evaluation.objective < melhor.evaluation.objective) melhor = r;
-    });
+    const guardado = {
+      ...LIMITE_AFINAR
+    };
+    LIMITE_AFINAR.ok = 1200;
+    LIMITE_AFINAR.falha = 3000;
+    try {
+      Object.keys(FORMACOES).forEach(f => {
+        const r = resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, f, ligacoes);
+        if (!r) return;
+        r.formacao = f;
+        if (!melhor || r.evaluation.objective < melhor.evaluation.objective) melhor = r;
+      });
+    } finally {
+      LIMITE_AFINAR.ok = guardado.ok;
+      LIMITE_AFINAR.falha = guardado.falha;
+    }
     return melhor;
   }
   const r = resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, ligacoes);
   if (r) r.formacao = minChem > 0 ? Array.isArray(formacao) ? formacao.join(" ") : formacao : null;
   return r;
+}
+// Requisitos que se resolvem contando cartas que batem certo (nação X, Silver,
+// OVR ≥ N…). Os de conjunto (máx. clubes, etc.) ficam de fora.
+// Tempo máximo (ms) a afinar depois de haver solução completa, e a insistir
+// quando ainda não há. No modo "testar todas as formações" encurta-se.
+const LIMITE_AFINAR = {
+  ok: 5000,
+  falha: 8000
+};
+function reqsPorJogador(reqs) {
+  return (reqs || []).filter(r => !REQ_CONJUNTO.has(r.field) && Number(r.min) > 0);
+}
+// Plantel de partida que já cumpre as contagens: para cada requisito apanha as
+// cartas mais baratas (ou ao acaso) que o satisfazem, e enche o resto.
+function semearPlantel(pool, livres, reqs, aleatorio) {
+  const sel = [],
+    ids = new Set(),
+    keys = new Set();
+  const poe = p => {
+    sel.push(p);
+    ids.add(idDe(p));
+    keys.add(p.key);
+  };
+  const rs = reqsPorJogador(reqs);
+  const porCusto = (a, b) => costOf(a) - costOf(b) || a.rating - b.rating;
+  for (const r of aleatorio ? shuffle(rs) : rs) {
+    let tenho = sel.filter(p => countMatching([p], r) > 0).length;
+    if (tenho >= Number(r.min)) continue;
+    let cand = pool.filter(p => !keys.has(p.key) && !ids.has(idDe(p)) && countMatching([p], r) > 0);
+    cand = aleatorio ? shuffle(cand) : cand.sort(porCusto);
+    for (const p of cand) {
+      if (tenho >= Number(r.min) || sel.length >= livres) break;
+      if (keys.has(p.key) || ids.has(idDe(p))) continue;
+      poe(p);
+      tenho++;
+    }
+  }
+  for (const p of aleatorio ? shuffle(pool) : [...pool].sort(porCusto)) {
+    if (sel.length >= livres) break;
+    if (keys.has(p.key) || ids.has(idDe(p))) continue;
+    poe(p);
+  }
+  return sel.length === livres ? sel : null;
 }
 function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, formacao, ligacoes) {
   // As posições bloqueadas não se preenchem: só escolhemos os lugares restantes.
@@ -1780,14 +1897,45 @@ function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form
   }
   let best = semRep.length === livres ? semRep : byCost.slice(0, livres);
   let bestEval = aval(best);
-  const voltas = minChem > 0 ? 5 : 14;
-  const passos = minChem > 0 ? 500 : 900;
+  // Arranque que já cumpre as contagens (ex: "mín. 3 Silver"): um onze ao acaso
+  // quase nunca as cumpre todas, e a procura por trocas não as encontra sozinha.
+  const semente0 = semearPlantel(pool, livres, reqs, false);
+  if (semente0) {
+    const e0 = aval(semente0);
+    if (e0.objective < bestEval.objective) {
+      best = semente0;
+      bestEval = e0;
+    }
+  }
+  // Se algum requisito pede mais cartas do que as que existem, não há solução:
+  // uma volta chega para ter a melhor tentativa (serve para explicar a falha).
+  const inviavel = reqsPorJogador(reqs).some(r => new Set(pool.filter(p => countMatching([p], r) > 0).map(idDe)).size < Number(r.min));
+  const voltas = inviavel ? 1 : minChem > 0 ? 10 : 16;
+  const passos = minChem > 0 ? 400 : 700;
+  const inicio = Date.now();
   for (let restart = 0; restart < voltas; restart++) {
-    let cand = restart === 0 ? [...best] : shuffle(pool).slice(0, livres);
+    // Já há solução completa e o tempo de afinação acabou: pára. Sem solução
+    // completa continua a tentar, até um tecto, antes de desistir.
+    const gasto = Date.now() - inicio;
+    if (bestEval.ok && restart >= 3 && gasto > LIMITE_AFINAR.ok) break;
+    if (!bestEval.ok && restart >= 6 && gasto > LIMITE_AFINAR.falha) break;
+    // Com solução completa em mão, uma carta que sozinha custa mais do que essa
+    // solução inteira nunca pode estar numa melhor: deixa de ser candidata.
+    const w0 = burnWeight == null ? 1 : burnWeight;
+    let pl = pool;
+    if (bestEval.ok) {
+      const util = pool.filter(c => cashOf(c) + burnOf(c) * w0 <= bestEval.objective);
+      if (util.length >= livres) pl = util;
+    }
+    let cand;
+    if (restart === 0) cand = [...best];
+    else if (restart === 1 && semente0) cand = [...semente0];
+    else if (restart % 2 === 0) cand = semearPlantel(pl, livres, reqs, true) || shuffle(pl).slice(0, livres);
+    else cand = shuffle(pl).slice(0, livres);
     let candEval = aval(cand);
     for (let it = 0; it < passos; it++) {
       const idx = Math.floor(Math.random() * livres);
-      const swapIn = pool[Math.floor(Math.random() * pool.length)];
+      const swapIn = pl[Math.floor(Math.random() * pl.length)];
       if (cand.some((p, i) => p.key === swapIn.key || i !== idx && idDe(p) === idDe(swapIn))) continue;
       const trial = [...cand];
       trial[idx] = swapIn;
@@ -1799,7 +1947,7 @@ function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form
     }
     // Afinação sistemática: a troca ao acaso raramente acerta na carta certa
     // no meio de milhares; aqui experimentam-se todas as que servem em cada lugar.
-    const fino = refinar(cand, candEval, pool, aval);
+    const fino = refinar(cand, candEval, pl, aval);
     cand = fino.cand;
     candEval = fino.ev;
     if (candEval.objective < bestEval.objective) {
@@ -1854,6 +2002,201 @@ function refinar(cand, ev, pool, aval) {
   return {
     cand,
     ev
+  };
+}
+// Poda por SBC: de todas as cartas do mercado só interessam as que não são
+// "dominadas". Duas cartas do mesmo tipo (mesmos atributos que ESTA SBC olha) e
+// do mesmo escalão de requisitos são equivalentes, e uma que é mais cara E pior
+// que outra nunca compensa. Guardam-se tantas camadas quantas cartas tem o plantel,
+// por isso o óptimo mantém-se. Sem isto, com Bronze/Prata o solver ficava lento.
+function podarPorSBC(pool, reqs, minChem, maxAvg, size) {
+  const mercado = pool.filter(p => p.market && !p.fantasma);
+  if (mercado.length < 1500) return pool;
+  const resto = pool.filter(p => !p.market || p.fantasma);
+  const campos = new Set();
+  (reqs || []).forEach(r => {
+    const f = String(r.field);
+    if (["nation", "league", "club", "rarity"].includes(f)) campos.add(f);else if (/Club/.test(f)) campos.add("club");else if (/League/.test(f)) campos.add("league");else if (/Nation/.test(f)) campos.add("nation");
+  });
+  const comPos = minChem > 0;
+  if (comPos) ["club", "league", "nation"].forEach(c => campos.add(c));
+  // Os escalões onde os requisitos de OVR mudam de resposta.
+  const cortes = new Set([65, 75]);
+  (reqs || []).forEach(r => {
+    if (r.field === "ratingMin") cortes.add(Number(r.value));
+    if (r.field === "ratingMax") cortes.add(Number(r.value) + 1);
+  });
+  const cortesOrd = [...cortes].sort((a, b) => a - b);
+  const escalao = rt => cortesOrd.filter(c => c <= rt).length;
+  const exacto = maxAvg > 0; // com tecto de média, o OVR exacto importa
+  const classes = new Map();
+  mercado.forEach(c => {
+    const k = [...campos].map(f => c[f]).join("|") + "#" + (comPos ? c.position + "," + (c.altPositions || []).slice().sort().join(",") : "") + "#" + (exacto ? c.rating : escalao(c.rating));
+    let g = classes.get(k);
+    if (!g) {
+      g = [];
+      classes.set(k, g);
+    }
+    g.push(c);
+  });
+  const camadas = Math.max(4, size || 11);
+  const kept = [];
+  classes.forEach(g => {
+    let rest = g.sort((a, b) => a.price - b.price || b.rating - a.rating);
+    for (let l = 0; l < camadas && rest.length; l++) {
+      let melhor = -1;
+      const prox = [];
+      for (const c of rest) {
+        if (c.rating > melhor) {
+          kept.push(c);
+          melhor = c.rating;
+        } else prox.push(c);
+      }
+      rest = prox;
+    }
+  });
+  return [...resto, ...kept];
+}
+// Cartas "fantasma": quando nem o clube nem o mercado têm cartas que cheguem
+// para um requisito (ex: 3 Silver, só há 2), tento outra vez com cartas imaginárias
+// que cumprem só esse requisito. Se assim há solução, a carta fantasma diz-te
+// que tipo de carta tens de ir procurar. Fantasmas: qualquer posição, sem clube
+// nem liga (por isso não dão química) e só entram se não houver alternativa.
+function gerarFantasmas(reqStatus) {
+  const falta = (reqStatus || []).filter(r => !r.met && !REQ_CONJUNTO.has(r.field) && Number(r.min) > 0);
+  if (!falta.length) return [];
+  const CAMPOS = ["nation", "league", "club", "rarity"];
+  const novo = () => ({
+    lo: 45,
+    hi: 99,
+    campos: {},
+    tier: null,
+    n: 1
+  });
+  const aplica = (sp, r) => {
+    if (r.field === "ratingMin") sp.lo = Math.max(sp.lo, Number(r.value));else if (r.field === "ratingMax") sp.hi = Math.min(sp.hi, Number(r.value));else if (r.field === "tier") {
+      const b = TIERS[String(r.value).toLowerCase()];
+      if (!b) return false;
+      sp.lo = Math.max(sp.lo, b[0]);
+      sp.hi = Math.min(sp.hi, b[1]);
+      sp.tier = String(r.value);
+    } else if (CAMPOS.includes(r.field)) {
+      const alts = String(r.value).split("|");
+      const atual = sp.campos[r.field];
+      if (atual && atual.join("|").toLowerCase() !== alts.join("|").toLowerCase()) return false;
+      sp.campos[r.field] = alts;
+    } else return false;
+    return sp.lo <= sp.hi;
+  };
+  const quantas = r => Math.max(1, Math.min(4, Number(r.min) - (Number(r.count) || 0)));
+  const specs = [];
+  // Uma carta que cumpre todos os requisitos em falta de uma vez (se forem compatíveis)…
+  if (falta.length > 1) {
+    const sp = novo();
+    if (falta.every(r => aplica(sp, r))) {
+      sp.n = Math.max(...falta.map(quantas));
+      specs.push(sp);
+    }
+  }
+  // …e uma por requisito, para o caso de não serem compatíveis.
+  falta.forEach(r => {
+    const sp = novo();
+    if (aplica(sp, r)) {
+      sp.n = quantas(r);
+      specs.push(sp);
+    }
+  });
+  const out = [];
+  specs.forEach((sp, si) => {
+    for (let c = 1; c <= sp.n; c++) {
+      for (let rt = sp.lo; rt <= sp.hi; rt++) {
+        out.push({
+          key: `falta-${si}-${c}-${rt}`,
+          ident: `falta-${si}-${c}`,
+          name: `Carta em falta ${si}-${c}`,
+          rating: rt,
+          position: "*",
+          altPositions: [],
+          nation: sp.campos.nation ? sp.campos.nation[0] : "?",
+          league: sp.campos.league ? sp.campos.league[0] : "?",
+          club: sp.campos.club ? sp.campos.club[0] : "?",
+          rarity: sp.campos.rarity ? sp.campos.rarity[0] : "?",
+          untradeable: false,
+          price: 0,
+          inActiveSquad: false,
+          owned: false,
+          market: true,
+          fantasma: true,
+          spec: sp
+        });
+      }
+    }
+  });
+  return out;
+}
+// "Silver, Brazil, OVR 74+" — o que procurar no mercado.
+function descreverFantasma(p) {
+  const sp = p.spec || {};
+  const partes = [];
+  if (sp.tier) partes.push(sp.tier);
+  ["nation", "league", "club", "rarity"].forEach(c => {
+    if (sp.campos && sp.campos[c]) partes.push(sp.campos[c].join(" ou "));
+  });
+  const hi = sp.hi != null && sp.hi < 99 ? sp.hi : null;
+  partes.push(hi ? p.rating >= hi ? `OVR ${hi}` : `OVR ${p.rating}-${hi}` : `OVR ${p.rating}+`);
+  return partes.join(", ");
+}
+// Quando não há solução completa: diz porquê, em vez de mostrar uma tentativa
+// que falha requisitos (essa não serve para fazer a SBC).
+function diagnosticarFalha(pool, r, extra) {
+  const ex = extra || {};
+  const ev = r && r.evaluation;
+  const motivos = [],
+    dicas = [];
+  if (!ev) {
+    return {
+      motivos: ["Não há cartas suficientes disponíveis para preencher o plantel."],
+      dicas: []
+    };
+  }
+  const distintos = lista => new Set(lista.map(idDe)).size;
+  const noMercadoSo = ex.mercadoMin != null ? ex.mercadoMin : null;
+  (ev.reqStatus || []).forEach(rs => {
+    if (rs.met) return;
+    if (REQ_CONJUNTO.has(rs.field)) {
+      motivos.push(`${reqLabel(rs)} — o melhor que consegui foi ${rs.count}`);
+      return;
+    }
+    const min = Number(rs.min) || 0;
+    const disp = distintos(pool.filter(p => countMatching([p], rs) > 0));
+    if (disp < min) {
+      motivos.push(`${reqLabel(rs)} — só há ${disp} carta(s) assim disponíveis`);
+      const prot = (ex.protegidas || []).filter(p => countMatching([p], rs) > 0).length;
+      if (prot > 0) dicas.push(`Tens ${prot} carta(s) assim no teu onze activo — desmarca "Não tocar nas cartas do onze activo" para as poder usar.`);
+      const indis = (ex.indisponiveis || []).filter(p => countMatching([p], rs) > 0).length;
+      if (indis > 0) dicas.push(`${indis} carta(s) assim estão como empréstimo ou bloqueadas, por isso ficam de fora.`);
+      if (ex.temMercado && !ex.usaMercado) dicas.push('Está desligado "Deixar comprar do mercado" — ligá-lo pode dar-te cartas que faltam.');
+      const banda = rs.field === "tier" ? TIERS[String(rs.value).toLowerCase()] : null;
+      const abaixo = banda && noMercadoSo != null && banda[1] < noMercadoSo || rs.field === "ratingMax" && noMercadoSo != null && Number(rs.value) < noMercadoSo;
+      if (abaixo) dicas.push(`O mercado online só tem cartas de ${noMercadoSo} para cima, por isso estas só podem vir do teu clube. Para o mercado as cobrir é preciso importar ratings mais baixos (sync-cartas com rating mínimo mais baixo).`);
+    } else {
+      motivos.push(`${reqLabel(rs)} — há ${disp} cartas assim, mas não consegui juntá-las aos outros requisitos (a melhor tentativa ficou com ${rs.count})`);
+    }
+  });
+  if (ev.ratingGap > 0.0001) {
+    const alvo = ex.minAvg > 0 && ev.avg < ex.minAvg ? `média mínima ${ex.minAvg}` : `média máxima ${ex.maxAvg}`;
+    motivos.push(`${alvo} — a melhor tentativa ficou com ${ev.avg.toFixed(2)}`);
+  }
+  if (ev.chemGap > 0 && ev.quimica) {
+    motivos.push(`química mínima — a melhor tentativa ficou com ${ev.quimica.total}`);
+  }
+  if (ev.repetidos > 0) {
+    motivos.push(`não há cartas distintas que cheguem (${ev.repetidos} jogador(es) repetido(s))`);
+  }
+  if (!motivos.length) motivos.push("Não encontrei uma combinação que cumpra tudo ao mesmo tempo.");
+  return {
+    motivos,
+    dicas: [...new Set(dicas)]
   };
 }
 function Linha({
@@ -2027,6 +2370,7 @@ function SBCSolver() {
     min: 1
   });
   const [result, setResult] = useState(null);
+  const [falha, setFalha] = useState(null);
   const [busy, setBusy] = useState(false);
   const [sbcRaw, setSbcRaw] = useState("");
   const [sbcList, setSbcList] = useState([]);
@@ -2126,13 +2470,46 @@ function SBCSolver() {
     setTimeout(() => {
       const form = formacao === "custom" ? lerFormacao(formTexto).slots : formacao;
       const size = sizeEf;
-      const r = solve(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form, ligacoes);
+      const poolR = podarPorSBC(pool, reqs, minChem, maxAvg, size);
+      let r = solve(poolR, size, minAvg, reqs, burnWeight, maxAvg, minChem, form, ligacoes);
+      // Sem solução com o que há? Vê que tipo de carta faltava.
+      if (r && r.evaluation && !r.evaluation.ok) {
+        const fant = gerarFantasmas(r.evaluation.reqStatus);
+        if (fant.length) {
+          const r2 = solve([...poolR, ...fant], size, minAvg, reqs, burnWeight, maxAvg, minChem, form, ligacoes, {
+            pularMeus: true
+          });
+          if (r2 && r2.evaluation && r2.evaluation.ok && r2.squad.some(p => p.fantasma)) {
+            r = r2;
+            r.comFalta = true;
+          }
+        }
+      }
       // Sem requisito de química o solver não arruma o onze; arruma-se só para mostrar.
       const formOk = Array.isArray(form) ? form.length >= size : !!FORMACOES[form];
       if (r && r.evaluation && !r.evaluation.quimica && formOk && Array.isArray(r.squad)) {
         r.evaluation.quimica = calcularQuimica(r.squad, form, ligacoes);
       }
-      setResult(r);
+      // Solução incompleta não serve para nada: não a mostro, explico porquê.
+      if (!r || !r.evaluation || !r.evaluation.ok) {
+        const bloq = new Set(bloqueadas);
+        const minsM = Object.keys(mercado).map(Number).filter(Boolean);
+        const minsP = Object.keys(prices).map(Number).filter(Boolean);
+        const todos = minsM.length ? minsM : minsP;
+        setFalha(diagnosticarFalha(pool, r, {
+          minAvg,
+          maxAvg,
+          mercadoMin: todos.length ? Math.min(...todos) : null,
+          temMercado: todos.length > 0,
+          usaMercado: useMarket,
+          protegidas: protectSquad ? players.filter(p => !p.loan && !bloq.has(String(p.key)) && p.inActiveSquad) : [],
+          indisponiveis: players.filter(p => p.loan || bloq.has(String(p.key)))
+        }));
+        setResult(null);
+      } else {
+        setFalha(null);
+        setResult(r);
+      }
       setBusy(false);
     }, 20);
   };
@@ -2639,6 +3016,7 @@ function SBCSolver() {
     })));
     setLoaded(c);
     setResult(null);
+    setFalha(null);
   };
   const guardarLigacoes = lista => {
     setLigacoes(lista);
@@ -3689,7 +4067,23 @@ function SBCSolver() {
     className: "bg-[#c9a227] hover:bg-[#b58f1f] disabled:opacity-40 text-[#1a1506] text-sm font-semibold px-5 py-2 rounded"
   }, busy ? "A resolver…" : "Resolver SBC"), /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] text-xs"
-  }, pool.length, " cartas dispon\xEDveis", protectSquad && players.length > pool.length ? ` (${players.length - pool.length} protegidas no onze)` : "")), result && /*#__PURE__*/React.createElement("div", {
+  }, pool.length, " cartas dispon\xEDveis", protectSquad && players.length > pool.length ? ` (${players.length - pool.length} protegidas no onze)` : "")), falha && !busy && /*#__PURE__*/React.createElement("div", {
+    className: "rounded border border-[#5a2f2a] bg-[#1d1210] p-4 space-y-3"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-[#e0736b] text-sm font-semibold"
+  }, "N\xE3o h\xE1 solu\xE7\xE3o completa com as cartas dispon\xEDveis."), /*#__PURE__*/React.createElement("ul", {
+    className: "space-y-1"
+  }, falha.motivos.map((m, i) => /*#__PURE__*/React.createElement("li", {
+    key: i,
+    className: "text-sm text-[#dfe6ec]"
+  }, "\u2022 ", m))), falha.dicas.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "rounded border border-[#4a3520] bg-[#1d1710] p-3 space-y-1"
+  }, falha.dicas.map((d, i) => /*#__PURE__*/React.createElement("p", {
+    key: i,
+    className: "text-[#d9a955] text-sm"
+  }, d))), /*#__PURE__*/React.createElement("p", {
+    className: "text-[#6b7885] text-xs"
+  }, "N\xE3o te mostro uma tentativa incompleta: n\xE3o serve para fazer a SBC.")), result && /*#__PURE__*/React.createElement("div", {
     className: "rounded border border-[#26303b] bg-[#111820] p-4 space-y-4"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex flex-wrap gap-6"
@@ -3713,9 +4107,20 @@ function SBCSolver() {
     tone: result.evaluation.chemGap ? "bad" : "good"
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "Requisitos",
-    value: result.evaluation.ok ? "todos cumpridos" : "incompletos",
+    value: result.comFalta ? "com a carta em falta" : result.evaluation.ok ? "todos cumpridos" : "incompletos",
     tone: result.evaluation.ok ? "good" : "bad"
-  })), result.evaluation.repetidos > 0 && /*#__PURE__*/React.createElement("p", {
+  })), result.comFalta && /*#__PURE__*/React.createElement("div", {
+    className: "rounded border border-[#4a3520] bg-[#1d1710] p-3 space-y-1"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-[#d9a955] text-sm font-semibold"
+  }, "Falta(m) ", result.squad.filter(p => p.fantasma).length, " carta(s) que n\u00e3o tens nem h\u00e1 no mercado. Procura no mercado:"), /*#__PURE__*/React.createElement("ul", {
+    className: "space-y-1"
+  }, result.squad.filter(p => p.fantasma).map(p => /*#__PURE__*/React.createElement("li", {
+    key: p.key,
+    className: "text-sm text-[#f4faf7]"
+  }, "\u2022 ", descreverFantasma(p)))), /*#__PURE__*/React.createElement("p", {
+    className: "text-[#6b7885] text-xs"
+  }, "Qualquer posi\u00e7\u00e3o serve. O OVR \u00e9 o que a solu\u00e7\u00e3o precisa: \"74+\" quer dizer 74 ou mais, \"68-74\" qualquer valor desse intervalo. Se tiveres alternativas, escolhe as mais baratas.")), result.evaluation.repetidos > 0 && /*#__PURE__*/React.createElement("p", {
     className: "text-[#d9836f] text-sm"
   }, "N\xE3o consegui evitar ", result.evaluation.repetidos, " jogador(es) repetido(s) \u2014 n\xE3o h\xE1 cartas distintas que cheguem. Carrega mais ratings no mercado ou reimporta o clube."), result.semCompras && /*#__PURE__*/React.createElement("p", {
     className: "text-[#4fbf83] text-sm"
@@ -3783,13 +4188,15 @@ function SBCSolver() {
     className: "border-t border-[#1e2731]"
   }, /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2"
-  }, p.name, p.market && /*#__PURE__*/React.createElement("span", {
+  }, p.fantasma ? /*#__PURE__*/React.createElement("span", {
+    className: "text-[#d9a955]"
+  }, "Carta em falta \u2014 ", descreverFantasma(p)) : p.name, p.market && !p.fantasma && /*#__PURE__*/React.createElement("span", {
     className: "ml-2 text-[10px] text-[#d9a955]"
   }, "comprar")), /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2 tabular-nums"
   }, p.rating), /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2"
-  }, p.position), result.evaluation.quimica && (() => {
+  }, p.fantasma ? "qualquer" : p.position), result.evaluation.quimica && (() => {
     const a = result.evaluation.quimica.posto.find(x => x.player.key === p.key);
     return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
       className: "px-3 py-2"
@@ -3800,13 +4207,15 @@ function SBCSolver() {
     }, a ? a.chem : 0));
   })(), /*#__PURE__*/React.createElement("td", {
     className: "px-3 py-2 tabular-nums"
-  }, p.untradeable ? /*#__PURE__*/React.createElement("span", {
+  }, p.fantasma ? /*#__PURE__*/React.createElement("span", {
+    className: "text-[#d9a955]"
+  }, "procurar") : p.untradeable ? /*#__PURE__*/React.createElement("span", {
     className: "text-[#4fbf83]"
   }, "gr\xE1tis") : /*#__PURE__*/React.createElement("span", {
     className: "text-[#d9a955]"
   }, (p.price ?? 0).toLocaleString("pt-PT")))))))), /*#__PURE__*/React.createElement("div", {
     className: "flex flex-wrap items-center gap-3 pt-1"
-  }, /*#__PURE__*/React.createElement("button", {
+  }, !result.comFalta && /*#__PURE__*/React.createElement("button", {
     onClick: markDone,
     className: `${result.evaluation.ok ? "bg-[#2f9e6e] hover:bg-[#278a5f]" : "bg-[#5d8fc4] hover:bg-[#4d7cae]"} text-[#f4faf7] text-sm font-medium px-4 py-1.5 rounded`
   }, confirmarFeito ? `Sim, remover ${result.squad.filter(p => !p.market).length} cartas do clube` : "Fiz esta SBC \u2014 remover as cartas"), confirmarFeito && !result.evaluation.ok && /*#__PURE__*/React.createElement("span", {

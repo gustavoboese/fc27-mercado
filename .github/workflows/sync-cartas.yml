@@ -6,7 +6,7 @@ on:
     inputs:
       rating_min:
         description: "Rating minimo"
-        default: "75"
+        default: "45"
       rating_max:
         description: "Rating maximo"
         default: "99"
@@ -20,6 +20,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          RATING_MIN: ${{ inputs.rating_min || '75' }}
+          RATING_MIN: ${{ inputs.rating_min || '45' }}
           RATING_MAX: ${{ inputs.rating_max || '99' }}
         run: ./scripts/sync-cartas.ps1 -Min $env:RATING_MIN -Max $env:RATING_MAX
