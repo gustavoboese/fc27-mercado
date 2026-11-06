@@ -649,6 +649,13 @@ async function pesquisarCartas(texto) {
   const rows = await r.json();
   return Array.isArray(rows) ? rows : [];
 }
+async function precoDaCarta(eaId) {
+  const r = await fetch(`${SUPA_URL}/rest/v1/precos?select=preco_consola&ea_id=eq.${Number(eaId)}&limit=1`, { headers: { apikey: SUPA_KEY } });
+  if (!r.ok) return null;
+  const rows = await r.json();
+  const v = Array.isArray(rows) && rows[0] ? Number(rows[0].preco_consola) : 0;
+  return v > 0 ? v : null;
+}
 const CSTORE = "sbc-solver-cards";
 const MAX_CARTAS = 600;
 const MAX_PONTOS = 40;
@@ -2465,7 +2472,8 @@ function SBCSolver() {
     untradeable: true,
     price: "",
     altPositions: [],
-    eaId: null
+    eaId: null,
+    precoMercado: null
   });
   const [busca, setBusca] = useState("");
   const [achadas, setAchadas] = useState(null);
@@ -2508,10 +2516,19 @@ function SBCSolver() {
       club: c.clube || "",
       rarity: c.raridade || "Rare",
       altPositions: c.posicoes_alt || [],
-      eaId: c.ea_id
+      eaId: c.ea_id,
+      precoMercado: null,
+      price: ""
     }));
     setBusca("");
     setAchadas(null);
+    precoDaCarta(c.ea_id).then(v => {
+      if (v) setMan(m => m.eaId === c.ea_id ? {
+        ...m,
+        precoMercado: v,
+        price: m.price === "" ? String(v) : m.price
+      } : m);
+    }).catch(() => {});
   };
   const doImport = () => {
     const {
@@ -3196,7 +3213,8 @@ function SBCSolver() {
       rating: "",
       price: "",
       altPositions: [],
-      eaId: null
+      eaId: null,
+      precoMercado: null
     }));
   };
   const markDone = () => {
@@ -3477,7 +3495,9 @@ function SBCSolver() {
       ...m,
       untradeable: e.target.checked
     }))
-  }), "Untradeable (o normal em cartas de packs de recompensa)"), /*#__PURE__*/React.createElement("button", {
+  }), "Untradeable (o normal em cartas de packs de recompensa)"), !man.untradeable && man.precoMercado && /*#__PURE__*/React.createElement("p", {
+    className: "text-[#6b7885] text-xs"
+  }, "Pre\xE7o de mercado: ", man.precoMercado.toLocaleString("pt-PT"), " (preenchido automaticamente)"), /*#__PURE__*/React.createElement("button", {
     onClick: addManual,
     disabled: !Number(man.rating),
     className: "bg-[#2f9e6e] hover:bg-[#278a5f] disabled:opacity-40 text-[#f4faf7] text-sm font-medium px-4 py-1.5 rounded"
