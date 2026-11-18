@@ -1760,7 +1760,36 @@ function idDe(p) {
   return id;
 }
 function costOf(p) {
-  return cashOf(p) + burnOf(p) + (p.fantasma ? 100000 + p.rating : 0);
+  return cashOf(p) + burnOf(p) + reservaOf(p) + (p.fantasma ? 100000 + p.rating : 0);
+}
+// Uma carta intransferível não é grátis: queimar um 80 hoje obriga a comprar um
+// 80 amanhã para a próxima SBC que peça 80+. Vale o que custa repor o OVR dela
+// (a carta mais barata do mercado com esse OVR ou mais), com um desconto para
+// gastar primeiro as intransferíveis quando o OVR é igual a uma vendável.
+const FATOR_RESERVA = 0.9;
+function tabelaReposicao(cartas) {
+  const minPor = {};
+  (cartas || []).forEach(c => {
+    const r = Number(c.rating),
+      v = Number(c.price);
+    if (!r || !(v > 0) || c.fantasma) return;
+    if (minPor[r] == null || v < minPor[r]) minPor[r] = v;
+  });
+  const out = {};
+  let melhor = null;
+  for (let r = 99; r >= 40; r--) {
+    if (minPor[r] != null && (melhor == null || minPor[r] < melhor)) melhor = minPor[r];
+    out[r] = melhor != null ? melhor : descarteDe(r);
+  }
+  return out;
+}
+function reservaDe(p, tabela) {
+  if (!p || p.market || p.owned === false || !p.untradeable) return 0;
+  const v = tabela && tabela[p.rating] != null ? tabela[p.rating] : descarteDe(p.rating);
+  return Math.round((Number(v) || 0) * FATOR_RESERVA);
+}
+function reservaOf(p) {
+  return Number(p && p.reserva) || 0;
 }
 function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao, ligacoes) {
   const w = burnWeight == null ? 1 : burnWeight;
@@ -1793,6 +1822,7 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
   });
   const cash = selection.reduce((s, p) => s + cashOf(p), 0);
   const burn = selection.reduce((s, p) => s + burnOf(p), 0);
+  const reserva = selection.reduce((s, p) => s + reservaOf(p), 0);
   const cost = cash + burn;
   const penalty = (ratingGap * 250 + reqGap * 400 + chemGap * 120 + repetidos * 500) * 1000;
 
@@ -1823,7 +1853,8 @@ function evaluate(selection, reqs, minAvg, burnWeight, maxAvg, minChem, formacao
     chemGap,
     cash,
     burn,
-    objective: cash + burn * w + burnEsp * (1 - w) + espSemPreco + penalty + burnTie + unknown + fantCusto
+    reserva,
+    objective: cash + burn * w + reserva * w + burnEsp * (1 - w) + espSemPreco + penalty + burnTie + unknown + fantCusto
   };
 }
 function shuffle(a) {
@@ -1963,7 +1994,7 @@ function resolverUma(pool, size, minAvg, reqs, burnWeight, maxAvg, minChem, form
     const w0 = burnWeight == null ? 1 : burnWeight;
     let pl = pool;
     if (bestEval.ok) {
-      const util = pool.filter(c => cashOf(c) + burnOf(c) * w0 <= bestEval.objective);
+      const util = pool.filter(c => cashOf(c) + (burnOf(c) + reservaOf(c)) * w0 <= bestEval.objective);
       if (util.length >= livres) pl = util;
     }
     let cand;
@@ -2555,10 +2586,16 @@ function SBCSolver() {
       if (r.field === "rarity") String(r.value).toLowerCase().split("|").forEach(x => raridadesPedidas.add(x.trim()));
     });
     const mine = players.filter(p => !p.loan && !bloq.has(String(p.key)) && !(protectSquad && p.inActiveSquad) && (usarEspeciais || !ehEspecial(p) || raridadesPedidas.has(String(p.rarity).toLowerCase())));
-    if (!useMarket) return mine;
+    const todoMercado = Object.keys(mercado).length ? cartasMercado(mercado) : marketCards(prices, Math.max(11, size), pricesPos);
+    const tabRep = tabelaReposicao(todoMercado);
+    const mineR = mine.map(p => p.untradeable ? {
+      ...p,
+      reserva: reservaDe(p, tabRep)
+    } : p);
+    if (!useMarket) return mineR;
     const fora = new Set(semMercado.map(x => x.k));
-    const doMercado = (Object.keys(mercado).length ? cartasMercado(mercado) : marketCards(prices, Math.max(11, size), pricesPos)).filter(c => !fora.has(c.key));
-    return [...mine, ...doMercado];
+    const doMercado = todoMercado.filter(c => !fora.has(c.key));
+    return [...mineR, ...doMercado];
   }, [players, protectSquad, prices, pricesPos, mercado, useMarket, size, bloqueadas, semMercado, usarEspeciais, reqs]);
   const guardarSemMercado = lista => {
     setSemMercado(lista);
@@ -3264,7 +3301,7 @@ function SBCSolver() {
     className: "text-2xl font-semibold tracking-tight text-[#f4faf7]"
   }, "SBC Solver"), /*#__PURE__*/React.createElement("p", {
     className: "text-[#8b98a5] text-sm mt-1"
-  }, "Monta a equipa mais barata para uma SBC, contando o que as tuas cartas valem mesmo \u2014 untradeable custa zero, vend\xE1vel custa o pre\xE7o de mercado.", sync === "ligado" && /*#__PURE__*/React.createElement("span", {
+  }, "Monta a equipa mais barata para uma SBC, contando o que as tuas cartas valem mesmo \u2014 vend\xE1vel custa o pre\xE7o de mercado, intransfer\xEDvel custa o que te sairia repor aquele OVR (por isso gasta primeiro os OVR mais baixos).", sync === "ligado" && /*#__PURE__*/React.createElement("span", {
     className: "text-[#4fbf83] ml-2"
   }, "\xB7 sincronizado com a tua conta"), sync === "local" && /*#__PURE__*/React.createElement("span", {
     className: "text-[#6b7885] ml-2"
@@ -4392,8 +4429,11 @@ function SBCSolver() {
   }, p.fantasma ? /*#__PURE__*/React.createElement("span", {
     className: "text-[#d9a955]"
   }, "procurar") : p.untradeable ? /*#__PURE__*/React.createElement("span", {
-    className: "text-[#4fbf83]"
-  }, "gr\xE1tis") : /*#__PURE__*/React.createElement("span", {
+    className: "text-[#4fbf83]",
+    title: "Intransfer\xEDvel: n\xE3o gasta moedas, mas repor este OVR no mercado custaria isto"
+  }, "gr\xE1tis", reservaOf(p) > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "ml-1 text-[10px] text-[#6b7885]"
+  }, "\xB7 repor ~", reservaOf(p).toLocaleString("pt-PT"))) : /*#__PURE__*/React.createElement("span", {
     className: "text-[#d9a955]"
   }, (p.price ?? 0).toLocaleString("pt-PT")))))))), /*#__PURE__*/React.createElement("div", {
     className: "flex flex-wrap items-center gap-3 pt-1"
